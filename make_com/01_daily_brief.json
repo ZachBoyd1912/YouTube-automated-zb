@@ -1,0 +1,127 @@
+{
+  "name": "01_daily_brief",
+  "flow": [
+    {
+      "id": 1,
+      "module": "gateway:CustomWebHook",
+      "version": 1,
+      "parameters": {
+        "hook": 1,
+        "maxResults": 1
+      },
+      "mapper": {},
+      "metadata": {
+        "designer": { "x": 0, "y": 0 },
+        "restore": {
+          "parameters": {
+            "hook": { "label": "Daily Brief Trigger (replace with Schedule trigger)" }
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "module": "http:ActionSendData",
+      "version": 3,
+      "parameters": { "handleErrors": true },
+      "mapper": {
+        "url": "http://YOUR_VPS_IP:8000/stage1_and_2",
+        "method": "POST",
+        "headers": [
+          {
+            "name": "Authorization",
+            "value": "Bearer YOUR_API_SECRET_KEY"
+          },
+          {
+            "name": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "queryString": [],
+        "body": "{}",
+        "bodyType": "raw",
+        "contentType": "application/json",
+        "timeout": 120,
+        "shareCookies": false,
+        "parseResponse": true,
+        "authUser": "",
+        "authPass": ""
+      },
+      "metadata": {
+        "designer": { "x": 300, "y": 0 },
+        "restore": {}
+      }
+    },
+    {
+      "id": 3,
+      "module": "builtin:BasicRouter",
+      "version": 1,
+      "parameters": {},
+      "mapper": {},
+      "metadata": { "designer": { "x": 600, "y": 0 } },
+      "routes": [
+        {
+          "flow": [
+            {
+              "id": 4,
+              "module": "builtin:SetVariable",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "name": "status",
+                "value": "{{2.data.status}}"
+              },
+              "metadata": { "designer": { "x": 900, "y": -100 } },
+              "filter": {
+                "name": "Success",
+                "conditions": [["{{2.statusCode}}", "between", "200", "299"]]
+              }
+            }
+          ]
+        },
+        {
+          "flow": [
+            {
+              "id": 5,
+              "module": "builtin:SetVariable",
+              "version": 1,
+              "parameters": {},
+              "mapper": {
+                "name": "error",
+                "value": "Stage 1+2 failed: {{2.data.message}}"
+              },
+              "metadata": { "designer": { "x": 900, "y": 100 } },
+              "filter": {
+                "name": "Error",
+                "conditions": [["{{2.statusCode}}", "greater", "299"]]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "metadata": {
+    "instant": false,
+    "version": 1,
+    "scenario": {
+      "roundtrips": 1,
+      "maxErrors": 3,
+      "autoCommit": true,
+      "autoCommitTriggerLast": true,
+      "sequential": false,
+      "slots": null,
+      "confidential": false,
+      "dataloss": false,
+      "dlq": false,
+      "freshVariables": false
+    },
+    "designer": { "orphans": [] },
+    "zone": "eu2.make.com"
+  },
+  "_setup_notes": {
+    "step1": "Replace the CustomWebHook trigger with a 'Schedule' trigger: Mon-Fri at 07:00 Europe/Dublin",
+    "step2": "Replace YOUR_VPS_IP with your server address (e.g. http://123.456.789.0:8000)",
+    "step3": "Replace YOUR_API_SECRET_KEY with the value from your .env file"
+  }
+}

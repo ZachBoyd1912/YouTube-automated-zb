@@ -1,0 +1,138 @@
+{
+  "name": "02_edit_pipeline",
+  "flow": [
+    {
+      "id": 1,
+      "module": "google-drive:TriggerNewFile",
+      "version": 3,
+      "parameters": {
+        "includeTeamDrives": false,
+        "watch": "files"
+      },
+      "mapper": {
+        "folderId": "YOUR_UPLOADS_FOLDER_ID",
+        "limit": 1
+      },
+      "metadata": {
+        "designer": { "x": 0, "y": 0 },
+        "restore": {
+          "parameters": {
+            "includeTeamDrives": { "label": "No" }
+          },
+          "mapper": {
+            "folderId": { "mode": "chose", "label": "YouTube Pipeline / uploads" }
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "module": "builtin:BasicFilter",
+      "version": 1,
+      "parameters": {},
+      "mapper": {},
+      "metadata": {
+        "designer": { "x": 300, "y": 0 }
+      },
+      "filter": {
+        "name": "MP4 files only",
+        "conditions": [["{{1.name}}", "text:endswith", ".mp4"]]
+      }
+    },
+    {
+      "id": 3,
+      "module": "http:ActionSendData",
+      "version": 3,
+      "parameters": { "handleErrors": true },
+      "mapper": {
+        "url": "http://YOUR_VPS_IP:8000/stage4",
+        "method": "POST",
+        "headers": [
+          { "name": "Authorization", "value": "Bearer YOUR_API_SECRET_KEY" },
+          { "name": "Content-Type", "value": "application/json" }
+        ],
+        "queryString": [],
+        "body": "{\"file_id\": \"{{1.id}}\"}",
+        "bodyType": "raw",
+        "contentType": "application/json",
+        "timeout": 1800,
+        "parseResponse": true
+      },
+      "metadata": { "designer": { "x": 600, "y": 0 } }
+    },
+    {
+      "id": 4,
+      "module": "http:ActionSendData",
+      "version": 3,
+      "parameters": { "handleErrors": true },
+      "mapper": {
+        "url": "http://YOUR_VPS_IP:8000/stage5",
+        "method": "POST",
+        "headers": [
+          { "name": "Authorization", "value": "Bearer YOUR_API_SECRET_KEY" },
+          { "name": "Content-Type", "value": "application/json" }
+        ],
+        "queryString": [],
+        "body": "{\"date\": \"{{3.data.date}}\", \"edited_video_local_path\": null}",
+        "bodyType": "raw",
+        "contentType": "application/json",
+        "timeout": 300,
+        "parseResponse": true
+      },
+      "metadata": {
+        "designer": { "x": 900, "y": 0 }
+      },
+      "filter": {
+        "name": "Stage 4 succeeded",
+        "conditions": [["{{3.statusCode}}", "between", "200", "299"]]
+      }
+    },
+    {
+      "id": 5,
+      "module": "http:ActionSendData",
+      "version": 3,
+      "parameters": { "handleErrors": true },
+      "mapper": {
+        "url": "http://YOUR_VPS_IP:8000/stage6",
+        "method": "POST",
+        "headers": [
+          { "name": "Authorization", "value": "Bearer YOUR_API_SECRET_KEY" },
+          { "name": "Content-Type", "value": "application/json" }
+        ],
+        "queryString": [],
+        "body": "{\"date\": \"{{3.data.date}}\"}",
+        "bodyType": "raw",
+        "contentType": "application/json",
+        "timeout": 600,
+        "parseResponse": true
+      },
+      "metadata": {
+        "designer": { "x": 1200, "y": 0 }
+      },
+      "filter": {
+        "name": "Stage 5 succeeded",
+        "conditions": [["{{4.statusCode}}", "between", "200", "299"]]
+      }
+    }
+  ],
+  "metadata": {
+    "instant": true,
+    "version": 1,
+    "scenario": {
+      "roundtrips": 1,
+      "maxErrors": 3,
+      "autoCommit": true,
+      "autoCommitTriggerLast": true,
+      "sequential": true,
+      "confidential": false,
+      "dataloss": false
+    },
+    "zone": "eu2.make.com"
+  },
+  "_setup_notes": {
+    "step1": "Connect your Google account to the Google Drive Watch module",
+    "step2": "Set YOUR_UPLOADS_FOLDER_ID to the Drive folder ID of '/YouTube Pipeline/uploads/'",
+    "step3": "Replace YOUR_VPS_IP and YOUR_API_SECRET_KEY throughout",
+    "step4": "The HTTP timeout for Stage 4 is set to 30 minutes — increase if your recordings are longer than 30 minutes"
+  }
+}
