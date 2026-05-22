@@ -12,8 +12,9 @@ def _require(key: str) -> str:
 
 
 # API Keys
-ANTHROPIC_API_KEY: str = _require("ANTHROPIC_API_KEY")
-OPENAI_API_KEY: str = _require("OPENAI_API_KEY")
+OPENROUTER_API_KEY: str = _require("OPENROUTER_API_KEY")
+OPENAI_API_KEY: str = _require("OPENAI_API_KEY")   # DALL-E 3 only
+GROQ_API_KEY: str = _require("GROQ_API_KEY")        # Whisper transcription
 NEXLEV_API_KEY: str = _require("NEXLEV_API_KEY")
 TUBEBUDDY_API_KEY: str = _require("TUBEBUDDY_API_KEY")
 TWILIO_ACCOUNT_SID: str = _require("TWILIO_ACCOUNT_SID")
@@ -30,8 +31,8 @@ GOOGLE_REFRESH_TOKEN: str = _require("GOOGLE_REFRESH_TOKEN")
 GOOGLE_DRIVE_ROOT_FOLDER_ID: str = _require("GOOGLE_DRIVE_ROOT_FOLDER_ID")
 GOOGLE_SHEETS_ID: str = _require("GOOGLE_SHEETS_ID")
 
-# Claude
-CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
+# LLM (DeepSeek via OpenRouter)
+LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek/deepseek-chat:free")
 
 # NexLev
 NEXLEV_BASE_URL: str = os.getenv("NEXLEV_BASE_URL", "https://app.nexlev.io/api")

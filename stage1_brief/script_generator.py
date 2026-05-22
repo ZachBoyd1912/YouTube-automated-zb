@@ -1,19 +1,16 @@
 """
-Calls Claude API to select the best topic and write a full 4-minute script.
-Uses tool_choice to force structured JSON output then validates it.
+Calls DeepSeek (via OpenRouter) to select the best topic and write a full 4-minute script.
+Uses forced tool calling for structured JSON output, then validates the result.
 """
-import json
 import logging
 from typing import Any
 
-import anthropic
-
 from shared import config
-from shared.error_handler import with_retry
+from shared.llm_client import forced_tool_call
 
 logger = logging.getLogger(__name__)
 
-TOOL_SCHEMA = {
+TOOL = {
     "name": "generate_video_brief",
     "description": (
         "Generate a complete YouTube video brief for the AI-tools-for-small-businesses channel."
@@ -23,7 +20,7 @@ TOOL_SCHEMA = {
         "properties": {
             "topic": {
                 "type": "string",
-                "description": "The specific topic for this video (e.g. 'How to use ChatGPT to write client emails in under 5 minutes')",
+                "description": "The specific topic for this video",
             },
             "angle": {
                 "type": "string",
@@ -40,23 +37,14 @@ TOOL_SCHEMA = {
             "shot_list": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Ordered list of screen-recording shots. Each starts with an action verb.",
+                "description": "Ordered screen-recording shots, each starting with an action verb.",
             },
-            "title_a": {
-                "type": "string",
-                "description": "Curiosity-based title (max 70 chars)",
-            },
-            "title_b": {
-                "type": "string",
-                "description": "SEO keyword-focused title (max 70 chars)",
-            },
-            "title_c": {
-                "type": "string",
-                "description": "Bold claim / outcome-focused title (max 70 chars)",
-            },
+            "title_a": {"type": "string", "description": "Curiosity-based title (max 70 chars)"},
+            "title_b": {"type": "string", "description": "SEO keyword-focused title (max 70 chars)"},
+            "title_c": {"type": "string", "description": "Bold claim / outcome title (max 70 chars)"},
             "thumbnail_brief": {
                 "type": "string",
-                "description": "Visual direction for DALL-E: describe the image, colours, layout, and text overlay",
+                "description": "Visual direction for DALL-E: image, colours, layout, text overlay area",
             },
             "estimated_duration": {
                 "type": "integer",
@@ -84,129 +72,99 @@ Channel style:
 - Irish/UK context where relevant (mention pricing in GBP/EUR, reference local businesses)
 
 Script structure (4 minutes / ~600 words):
-1. Hook (0:00–0:20): Bold claim, surprising stat, or direct question that names the viewer's problem
+1. Hook (0:00–0:20): Bold claim, surprising stat, or direct question naming the viewer's problem
 2. Problem (0:20–0:50): Expand on the pain point — why this matters right now
 3. Solution walkthrough (0:50–3:20): Step-by-step screen recording walkthrough
 4. CTA (3:20–4:00): Single clear call-to-action (subscribe + link in description)
 
 Shot list rules:
 - One shot per line, action verb first (e.g. "Open ChatGPT and paste the prompt...")
-- Match the script exactly — every script section has corresponding shots
+- Match the script exactly — every section has corresponding shots
 - Include what to show on screen at every step
 
-Title rules:
-- All three titles under 70 characters
+Title rules (ALL under 70 characters):
 - title_a: curiosity ("The AI tool Irish businesses are quietly using")
 - title_b: SEO keyword ("ChatGPT for small business: write emails in 5 min")
 - title_c: bold outcome ("I saved 3 hours/week with this one ChatGPT trick")
 
-Do not pad the script — 550–650 words is the hard target.
+Hard target: 550–650 words for the script. Do not pad or truncate beyond this range.
 """
 
 
-def _build_user_prompt(
-    candidates: list[dict[str, Any]],
-    recent_topics: list[str],
-) -> str:
+def _build_user_prompt(candidates: list[dict[str, Any]], recent_topics: list[str]) -> str:
     candidate_text = "\n".join(
-        f"- {c['title']} (engagement_score={c['engagement_score']}, views_7d={c['views_7d']})"
+        f"- {c['title']} (engagement={c['engagement_score']}, views_7d={c['views_7d']})"
         for c in candidates
     )
     recent_text = "\n".join(f"- {t}" for t in recent_topics) if recent_topics else "None yet"
-
-    return f"""\
-Below are {len(candidates)} trending topics in the "AI tools for small businesses" niche \
-(from NexLev analytics):
-
-{candidate_text}
-
-Recently published topics (DO NOT repeat these):
-{recent_text}
-
-Pick the single best topic to make a video about today. Consider:
-1. High engagement potential (NexLev score)
-2. Practical value for Irish/UK SMB owners
-3. Something you can demonstrate step-by-step in a 4-minute screen recording
-4. Not already covered in recent videos
-
-Then write the complete video brief using the generate_video_brief tool.\
-"""
+    return (
+        f"Trending topics in the 'AI tools for small businesses' niche ({len(candidates)} candidates):\n"
+        f"{candidate_text}\n\n"
+        f"Recently published topics (DO NOT repeat these):\n{recent_text}\n\n"
+        "Pick the single best topic and write the complete video brief."
+    )
 
 
 def _validate(brief: dict[str, Any]) -> list[str]:
-    """Return a list of validation error strings (empty = pass)."""
     errors: list[str] = []
     word_count = len(brief.get("script", "").split())
     if not (config.SCRIPT_WORD_COUNT_MIN <= word_count <= config.SCRIPT_WORD_COUNT_MAX):
         errors.append(
-            f"Script word count is {word_count} — must be {config.SCRIPT_WORD_COUNT_MIN}–{config.SCRIPT_WORD_COUNT_MAX}"
+            f"Script is {word_count} words — must be "
+            f"{config.SCRIPT_WORD_COUNT_MIN}–{config.SCRIPT_WORD_COUNT_MAX}"
         )
     for key in ("title_a", "title_b", "title_c"):
-        title = brief.get(key, "")
-        if len(title) > config.TITLE_MAX_CHARS:
-            errors.append(f"{key} is {len(title)} chars — max {config.TITLE_MAX_CHARS}")
-    shot_list = brief.get("shot_list", [])
-    if not shot_list:
+        if len(brief.get(key, "")) > config.TITLE_MAX_CHARS:
+            errors.append(f"{key} exceeds {config.TITLE_MAX_CHARS} chars")
+    if not brief.get("shot_list"):
         errors.append("shot_list is empty")
-    verbs = {"open", "show", "navigate", "click", "type", "paste", "record", "display",
-             "zoom", "highlight", "scroll", "switch", "copy", "go", "select", "demo",
-             "launch", "point", "save", "export", "upload", "pull", "enter"}
-    for i, shot in enumerate(shot_list):
-        first_word = shot.strip().split()[0].lower().rstrip(",") if shot.strip() else ""
-        if first_word not in verbs:
+    verbs = {
+        "open", "show", "navigate", "click", "type", "paste", "record", "display",
+        "zoom", "highlight", "scroll", "switch", "copy", "go", "select", "demo",
+        "launch", "point", "save", "export", "upload", "pull", "enter",
+    }
+    for i, shot in enumerate(brief.get("shot_list", [])):
+        first = shot.strip().split()[0].lower().rstrip(",") if shot.strip() else ""
+        if first not in verbs:
             errors.append(f"shot_list[{i}] must start with an action verb: {shot!r}")
-            break  # report once, not for every item
+            break
     return errors
-
-
-@with_retry(max_attempts=3)
-def _call_claude(messages: list[dict], correction: str | None = None) -> dict[str, Any]:
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    if correction:
-        messages = messages + [
-            {"role": "assistant", "content": "I'll fix those issues and regenerate the brief."},
-            {"role": "user", "content": correction},
-        ]
-    response = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        tools=[TOOL_SCHEMA],
-        tool_choice={"type": "tool", "name": "generate_video_brief"},
-        messages=messages,
-    )
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "generate_video_brief":
-            return block.input
-    raise ValueError("Claude did not return a generate_video_brief tool call")
 
 
 def generate_brief(
     candidates: list[dict[str, Any]],
     recent_topics: list[str],
 ) -> dict[str, Any]:
-    """
-    Generate a validated video brief. Retries up to 3 times with correction prompts
-    if validation fails.
-    """
+    """Generate a validated video brief, retrying up to 3 times if validation fails."""
     user_prompt = _build_user_prompt(candidates, recent_topics)
-    messages = [{"role": "user", "content": user_prompt}]
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
 
     for attempt in range(3):
-        brief = _call_claude(messages, correction=None if attempt == 0 else _build_correction(errors))
+        brief = forced_tool_call(
+            system=SYSTEM_PROMPT,
+            user="",  # messages_override used instead
+            tool=TOOL,
+            messages_override=messages,
+        )
         errors = _validate(brief)
         if not errors:
-            logger.info("Script generated and validated on attempt %d", attempt + 1)
+            logger.info("Script validated on attempt %d", attempt + 1)
             return brief
+
         logger.warning("Validation failed (attempt %d): %s", attempt + 1, errors)
+        error_list = "\n".join(f"- {e}" for e in errors)
+        messages = messages + [
+            {"role": "assistant", "content": f"[Generated brief with {len(errors)} issue(s)]"},
+            {
+                "role": "user",
+                "content": (
+                    f"The brief has these issues:\n{error_list}\n\n"
+                    "Please regenerate the complete brief, fixing all issues."
+                ),
+            },
+        ]
 
-    raise ValueError(f"Script failed validation after 3 attempts: {errors}")
-
-
-def _build_correction(errors: list[str]) -> str:
-    error_list = "\n".join(f"- {e}" for e in errors)
-    return (
-        f"The brief has the following issues that must be fixed:\n{error_list}\n\n"
-        "Please regenerate the complete brief using the generate_video_brief tool, "
-        "fixing all issues listed above."
-    )
+    raise ValueError(f"Script failed validation after 3 attempts. Last errors: {errors}")

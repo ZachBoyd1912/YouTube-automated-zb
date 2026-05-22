@@ -1,13 +1,11 @@
 """
-Generate YouTube metadata (description, tags, chapters, A/B plan) via Claude API.
+Generate YouTube metadata (description, tags, chapters, A/B plan) via DeepSeek on OpenRouter.
 """
 import logging
 from typing import Any
 
-import anthropic
-
 from shared import config
-from shared.error_handler import with_retry
+from shared.llm_client import forced_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +17,11 @@ METADATA_TOOL = {
         "properties": {
             "description": {
                 "type": "string",
-                "description": f"Full YouTube description, {config.DESCRIPTION_WORD_COUNT_MIN}–{config.DESCRIPTION_WORD_COUNT_MAX} words, keyword-rich, with timestamps section",
+                "description": (
+                    f"Full YouTube description, {config.DESCRIPTION_WORD_COUNT_MIN}–"
+                    f"{config.DESCRIPTION_WORD_COUNT_MAX} words, keyword-rich, "
+                    "with timestamps section at the end"
+                ),
             },
             "tags": {
                 "type": "array",
@@ -36,7 +38,6 @@ METADATA_TOOL = {
                     },
                     "required": ["time", "title"],
                 },
-                "description": "Video chapters matching the script structure",
             },
             "ab_test_plan": {
                 "type": "object",
@@ -60,25 +61,20 @@ You are a YouTube SEO specialist for a channel about AI tools for Irish and UK s
 
 Description rules:
 - 300–400 words
-- First 2 lines must be compelling (shown in search results before the "more" fold)
+- First 2 lines must be compelling (shown before the "more" fold)
 - Naturally include primary keyword in first sentence
 - Include a timestamps section at the end (00:00 Intro, etc.)
 - End with a subscribe CTA
 - Use British/Irish English spelling (organise, behaviour, colour)
 
-Tags rules:
-- Mix of exact-match (3–5 words) and broad keywords
-- Include location tags: "ireland", "uk small business", "irish entrepreneur"
-- Include tool-specific tags when relevant
-- No spaces within a tag that is itself a phrase — use the tag as a unit
+Tags: mix of exact-match phrases and broad keywords; include location tags \
+("ireland", "uk small business", "irish entrepreneur").
 
-Chapters:
-- Match the actual script sections (Hook → Problem → Solution → CTA)
-- 00:00 must always be first
+Chapters: match actual script sections (Hook → Problem → Solution → CTA). \
+First chapter must always be "00:00".
 """
 
 
-@with_retry(max_attempts=3)
 def generate_metadata(
     topic: str,
     script: str,
@@ -95,9 +91,7 @@ def generate_metadata(
         )
 
     user_prompt = (
-        f"Topic: {topic}\n\n"
-        f"Script:\n{script}\n\n"
-        f"Shot list:\n{shot_list}\n\n"
+        f"Topic: {topic}\n\nScript:\n{script}\n\nShot list:\n{shot_list}\n\n"
         f"Title variants:\n"
         f"  A (curiosity): {titles['title_a']}\n"
         f"  B (SEO): {titles['title_b']}\n"
@@ -105,24 +99,14 @@ def generate_metadata(
         f"{segments_text}"
     )
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=2048,
+    meta = forced_tool_call(
         system=SYSTEM_PROMPT,
-        tools=[METADATA_TOOL],
-        tool_choice={"type": "tool", "name": "generate_youtube_metadata"},
-        messages=[{"role": "user", "content": user_prompt}],
+        user=user_prompt,
+        tool=METADATA_TOOL,
+        max_tokens=2048,
     )
-
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "generate_youtube_metadata":
-            meta = block.input
-            word_count = len(meta["description"].split())
-            logger.info(
-                "Metadata generated: %d-word description, %d tags, %d chapters",
-                word_count, len(meta["tags"]), len(meta["chapters"]),
-            )
-            return meta
-
-    raise ValueError("Claude did not return generate_youtube_metadata tool call")
+    logger.info(
+        "Metadata generated: %d-word description, %d tags, %d chapters",
+        len(meta["description"].split()), len(meta["tags"]), len(meta["chapters"]),
+    )
+    return meta

@@ -1,88 +1,72 @@
 """
-Extract the best 45–60s Shorts clip: identify window via Claude, crop to 9:16, add captions.
+Extract the best 45–60s Shorts clip: identify window via DeepSeek, crop to 9:16, add captions.
 """
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
-import anthropic
-
 from shared import config, drive_client
-from shared.error_handler import with_retry
+from shared.llm_client import forced_tool_call
 
 logger = logging.getLogger(__name__)
 
 SHORTS_TOOL = {
     "name": "identify_shorts_window",
-    "description": "Identify the best 45–60 second clip from the transcript for a YouTube Short",
+    "description": "Identify the best 45–60 second clip for a YouTube Short",
     "input_schema": {
         "type": "object",
         "properties": {
-            "start_seconds": {"type": "number", "description": "Start time of the clip in seconds"},
-            "end_seconds": {"type": "number", "description": "End time of the clip in seconds"},
-            "reasoning": {"type": "string", "description": "Why this is the best segment"},
+            "start_seconds": {"type": "number"},
+            "end_seconds": {"type": "number"},
+            "reasoning": {"type": "string"},
         },
         "required": ["start_seconds", "end_seconds"],
     },
 }
 
 SYSTEM_PROMPT = """\
-You are selecting a 45–60 second clip from a YouTube tutorial transcript to repurpose as a \
-YouTube Short. Choose the window with:
+You are selecting a 45–60 second clip from a tutorial transcript for a YouTube Short.
+Choose the window with:
 1. A strong hook in the first 3 seconds (question, bold claim, or surprising statement)
-2. A complete, self-contained tip or demonstration that delivers clear value
-3. High energy and momentum — the speaker sounds confident and engaged
-4. Minimal filler, pauses, or context that requires the full video to understand
-The clip must be 45–60 seconds long (end_seconds - start_seconds = 45–60).
+2. A complete, self-contained tip that delivers clear value on its own
+3. High energy — speaker sounds confident and engaged
+4. Minimal filler or context that requires the full video to understand
+The clip MUST be 45–60 seconds (end_seconds - start_seconds between 45 and 60).
 """
 
 
-@with_retry(max_attempts=3)
 def _identify_window(transcript: dict[str, Any]) -> tuple[float, float]:
-    """Ask Claude to identify the best Shorts window. Returns (start, end) in seconds."""
     segments = transcript.get("segments", [])
     transcript_text = "\n".join(
         f"[{s['start']:.1f}s] {s.get('text', '').strip()}"
         for s in segments
     )
-
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=512,
+    result = forced_tool_call(
         system=SYSTEM_PROMPT,
-        tools=[SHORTS_TOOL],
-        tool_choice={"type": "tool", "name": "identify_shorts_window"},
-        messages=[{"role": "user", "content": f"Transcript:\n{transcript_text}"}],
+        user=f"Transcript:\n{transcript_text}",
+        tool=SHORTS_TOOL,
+        max_tokens=512,
     )
-
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "identify_shorts_window":
-            start = float(block.input["start_seconds"])
-            end = float(block.input["end_seconds"])
-            duration = end - start
-            if not (config.SHORTS_MIN_DURATION_SECONDS <= duration <= config.SHORTS_MAX_DURATION_SECONDS):
-                # Clamp to valid range
-                if duration < config.SHORTS_MIN_DURATION_SECONDS:
-                    end = start + config.SHORTS_MIN_DURATION_SECONDS
-                else:
-                    end = start + config.SHORTS_MAX_DURATION_SECONDS
-            logger.info("Shorts window: %.1f–%.1f (%.0fs)", start, end, end - start)
-            return start, end
-
-    raise ValueError("Claude did not return identify_shorts_window tool call")
+    start = float(result["start_seconds"])
+    end = float(result["end_seconds"])
+    duration = end - start
+    if duration < config.SHORTS_MIN_DURATION_SECONDS:
+        end = start + config.SHORTS_MIN_DURATION_SECONDS
+    elif duration > config.SHORTS_MAX_DURATION_SECONDS:
+        end = start + config.SHORTS_MAX_DURATION_SECONDS
+    logger.info("Shorts window: %.1f–%.1f (%.0fs)", start, end, end - start)
+    return start, end
 
 
 def _extract_and_crop(video_path: Path, start: float, end: float, output_path: Path) -> Path:
-    """Extract clip, crop to 9:16 (1080×1920), rescale."""
-    duration = end - start
     cmd = [
         "ffmpeg", "-y",
         "-ss", str(start),
         "-i", str(video_path),
-        "-t", str(duration),
+        "-t", str(end - start),
         "-vf", "crop=ih*9/16:ih,scale=1080:1920",
         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
         "-c:a", "aac", "-b:a", "128k",
@@ -95,12 +79,29 @@ def _extract_and_crop(video_path: Path, start: float, end: float, output_path: P
     return output_path
 
 
+def _shift_srt(src: Path, dst: Path, shift: float) -> None:
+    pattern = re.compile(r"(\d{2}:\d{2}:\d{2},\d{3})")
+
+    def time_to_s(t: str) -> float:
+        h, m, rest = t.split(":")
+        s, ms = rest.split(",")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+    def s_to_time(s: float) -> str:
+        s = max(0.0, s)
+        h = int(s // 3600)
+        m = int((s % 3600) // 60)
+        sec = int(s % 60)
+        ms = int((s % 1) * 1000)
+        return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+
+    text = src.read_text(encoding="utf-8")
+    dst.write_text(pattern.sub(lambda m: s_to_time(time_to_s(m.group(1)) + shift), text), encoding="utf-8")
+
+
 def _add_captions(clip_path: Path, srt_path: Path, start_offset: float, output_path: Path) -> Path:
-    """Burn in captions, offsetting SRT timestamps by -start_offset."""
-    # Rewrite SRT with adjusted timestamps
     adjusted_srt = clip_path.parent / "shorts_captions.srt"
     _shift_srt(srt_path, adjusted_srt, -start_offset)
-
     srt_escaped = str(adjusted_srt).replace(":", "\\:").replace("'", "\\'")
     cmd = [
         "ffmpeg", "-y",
@@ -121,42 +122,13 @@ def _add_captions(clip_path: Path, srt_path: Path, start_offset: float, output_p
     return output_path
 
 
-def _shift_srt(src: Path, dst: Path, shift: float) -> None:
-    """Shift all SRT timestamps by `shift` seconds (negative removes offset)."""
-    import re
-    pattern = re.compile(r"(\d{2}:\d{2}:\d{2},\d{3})")
-
-    def time_to_s(t: str) -> float:
-        h, m, rest = t.split(":")
-        s, ms = rest.split(",")
-        return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
-
-    def s_to_time(s: float) -> str:
-        s = max(0.0, s)
-        h = int(s // 3600)
-        m = int((s % 3600) // 60)
-        sec = int(s % 60)
-        ms = int((s % 1) * 1000)
-        return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
-
-    text = src.read_text(encoding="utf-8")
-
-    def replace_time(m: re.Match) -> str:
-        return s_to_time(time_to_s(m.group(1)) + shift)
-
-    dst.write_text(pattern.sub(replace_time, text), encoding="utf-8")
-
-
 def create_short(
     edited_video_path: Path,
     transcript: dict[str, Any],
     srt_path: Path | None,
     date_str: str,
 ) -> tuple[str, str]:
-    """
-    Create a vertical Shorts clip from the edited video.
-    Returns (drive_file_id, drive_link).
-    """
+    """Create a vertical Shorts clip. Returns (drive_file_id, drive_link)."""
     start, end = _identify_window(transcript)
     tmp_dir = edited_video_path.parent
 
@@ -171,9 +143,7 @@ def create_short(
         final_path = cropped_path
 
     folder_id = drive_client.get_dated_folder_id(config.DRIVE_SHORTS_FOLDER, date_str)
-    file_id, link = drive_client.upload_file(
-        final_path, folder_id, f"short_{date_str}.mp4"
-    )
+    file_id, link = drive_client.upload_file(final_path, folder_id, f"short_{date_str}.mp4")
     final_path.unlink(missing_ok=True)
     logger.info("Shorts clip uploaded → %s", link)
     return file_id, link

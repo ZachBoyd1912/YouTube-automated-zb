@@ -1,5 +1,6 @@
 """
-Download raw .mp4 from Drive, extract audio, transcribe with Whisper API (word-level timestamps).
+Download raw .mp4 from Drive, extract audio, transcribe with Groq Whisper (free tier).
+Groq's Whisper API is OpenAI-compatible and supports verbose_json with word-level timestamps.
 """
 import logging
 import subprocess
@@ -14,17 +15,16 @@ from shared.error_handler import with_retry
 
 logger = logging.getLogger(__name__)
 
+GROQ_TRANSCRIPTION_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
 
 def extract_audio(video_path: Path, audio_path: Path) -> Path:
     """Extract mono 16kHz audio from video using ffmpeg."""
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
-        "-vn",
-        "-ar", "16000",
-        "-ac", "1",
-        "-f", "mp3",
-        str(audio_path),
+        "-vn", "-ar", "16000", "-ac", "1",
+        "-f", "mp3", str(audio_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -36,18 +36,17 @@ def extract_audio(video_path: Path, audio_path: Path) -> Path:
 @with_retry(max_attempts=3)
 def transcribe_audio(audio_path: Path) -> dict[str, Any]:
     """
-    Send audio to Whisper API with word-level timestamps.
-    Returns the full verbose_json response dict.
+    Send audio to Groq's free Whisper API (whisper-large-v3).
+    Returns a verbose_json dict with word-level timestamps where available.
     """
-    url = "https://api.openai.com/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
+    headers = {"Authorization": f"Bearer {config.GROQ_API_KEY}"}
 
     with open(audio_path, "rb") as f:
         resp = httpx.post(
-            url,
+            GROQ_TRANSCRIPTION_URL,
             headers=headers,
             data={
-                "model": "whisper-1",
+                "model": "whisper-large-v3",
                 "response_format": "verbose_json",
                 "timestamp_granularities[]": "word",
             },
@@ -56,16 +55,15 @@ def transcribe_audio(audio_path: Path) -> dict[str, Any]:
         )
     resp.raise_for_status()
     data = resp.json()
-    logger.info("Transcription complete, %d words", len(data.get("words", [])))
+    word_count = len(data.get("words", data.get("segments", [])))
+    logger.info("Transcription complete via Groq Whisper, %d words/segments", word_count)
     return data
 
 
 def transcribe_video(file_id: str, date_str: str) -> tuple[dict[str, Any], Path]:
     """
     Full pipeline: download from Drive → extract audio → transcribe.
-
-    Returns:
-        (transcript_dict, local_video_path)
+    Returns (transcript_dict, local_video_path).
     """
     tmp_dir = Path(tempfile.mkdtemp(prefix="yt-pipeline-"))
     video_path = tmp_dir / f"raw_{date_str}.mp4"
