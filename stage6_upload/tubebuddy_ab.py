@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.tubebuddy.com/api"
 
 
+def _tubebuddy_enabled() -> bool:
+    return bool(config.TUBEBUDDY_API_KEY)
+
+
 def _headers() -> dict[str, str]:
     return {"Content-Type": "application/json"}
 
@@ -37,6 +41,9 @@ def create_thumbnail_ab_test(
     thumbnail_ids: list of Drive/YouTube thumbnail IDs (A, B, C).
     Returns the TubeBuddy test response.
     """
+    if not _tubebuddy_enabled():
+        logger.info("TubeBuddy API key not set — skipping thumbnail A/B test")
+        return {"skipped": True}
     if config.DRY_RUN:
         logger.info("[DRY RUN] Would create thumbnail A/B test for video %s", video_id)
         return {"test_id": "dry-run-test-id", "status": "created"}
@@ -73,6 +80,9 @@ def create_title_ab_test(
     Create a title A/B test for the given video.
     titles: [title_a, title_b, title_c]
     """
+    if not _tubebuddy_enabled():
+        logger.info("TubeBuddy API key not set — skipping title A/B test")
+        return {"skipped": True}
     if config.DRY_RUN:
         logger.info("[DRY RUN] Would create title A/B test for video %s", video_id)
         return {"test_id": "dry-run-title-test-id", "status": "created"}

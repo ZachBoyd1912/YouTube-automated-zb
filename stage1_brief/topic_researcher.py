@@ -1,155 +1,153 @@
 """
-Calls the NexLev API to find trending topics in the AI-tools-for-small-businesses niche.
+Finds trending topic candidates using the YouTube Data API v3.
+Searches for recent high-performing videos in the AI tools / small business niche,
+pulls their statistics, and returns normalised candidate dicts for the script generator.
 
-NexLev REST API base: https://app.nexlev.io/api
-Auth: Bearer token via NEXLEV_API_KEY
-
-NOTE: Verify the exact endpoint paths against NexLev's official API docs if any
-      calls return 404. The paths below are inferred from NexLev's MCP tool names.
+NexLev is used as an optional enrichment layer if NEXLEV_API_KEY is set.
+If not set (the common case), YouTube Data API is the sole source — no functionality lost.
 """
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
 
 from shared import config
 from shared.error_handler import with_retry
 
 logger = logging.getLogger(__name__)
 
+# Search queries cycled through to get diverse candidates
+SEARCH_QUERIES = [
+    "AI tools small business 2024",
+    "ChatGPT for business tutorial",
+    "AI automation small business ireland uk",
+    "artificial intelligence business productivity",
+    "AI tools save time business owner",
+]
 
-class NexLevClient:
-    def __init__(self) -> None:
-        self.base_url = config.NEXLEV_BASE_URL.rstrip("/")
-        self.headers = {
-            "Authorization": f"Bearer {config.NEXLEV_API_KEY}",
-            "Content-Type": "application/json",
+YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly"]
+
+
+def _get_service():
+    creds = Credentials(
+        token=None,
+        refresh_token=config.GOOGLE_REFRESH_TOKEN,
+        client_id=config.GOOGLE_CLIENT_ID,
+        client_secret=config.GOOGLE_CLIENT_SECRET,
+        token_uri="https://oauth2.googleapis.com/token",
+        scopes=YOUTUBE_SCOPES,
+    )
+    return build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+
+@with_retry(max_attempts=3)
+def _search_videos(service, query: str, published_after: str) -> list[dict]:
+    result = service.search().list(
+        q=query,
+        type="video",
+        order="viewCount",
+        publishedAfter=published_after,
+        maxResults=10,
+        relevanceLanguage="en",
+        videoDuration="medium",   # 4–20 min — matches Zach's format
+    ).execute()
+    return result.get("items", [])
+
+
+@with_retry(max_attempts=3)
+def _get_video_stats(service, video_ids: list[str]) -> dict[str, dict]:
+    """Return {video_id: {viewCount, likeCount, commentCount}} for a batch of IDs."""
+    if not video_ids:
+        return {}
+    result = service.videos().list(
+        part="statistics,snippet",
+        id=",".join(video_ids),
+    ).execute()
+    return {
+        item["id"]: {
+            "views": int(item["statistics"].get("viewCount", 0)),
+            "likes": int(item["statistics"].get("likeCount", 0)),
+            "title": item["snippet"]["title"],
+            "description": item["snippet"].get("description", "")[:200],
+            "channel": item["snippet"]["channelTitle"],
         }
-
-    @with_retry()
-    def search_videos(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        resp = httpx.get(
-            f"{self.base_url}/videos/search",
-            params={"q": query, "limit": limit},
-            headers=self.headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("results", data) if isinstance(data, dict) else data
-
-    @with_retry()
-    def get_niche_overview(self, niche: str) -> dict[str, Any]:
-        resp = httpx.get(
-            f"{self.base_url}/niche/overview",
-            params={"niche": niche},
-            headers=self.headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    @with_retry()
-    def get_trending_topics(self, niche: str, limit: int = 10) -> list[dict[str, Any]]:
-        """Pull the top trending video topics for a niche (last 7 days)."""
-        resp = httpx.get(
-            f"{self.base_url}/niche/trending",
-            params={"niche": niche, "days": 7, "limit": limit},
-            headers=self.headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("topics", data.get("results", data)) if isinstance(data, dict) else data
+        for item in result.get("items", [])
+    }
 
 
 def get_candidate_topics(recent_topics: list[str]) -> list[dict[str, Any]]:
     """
-    Pull NexLev data for the target niche and return a list of candidate topic dicts.
-    Each dict has: title, angle_hint, views_7d, engagement_score, channel_count.
+    Pull trending video data from YouTube and return normalised candidate topic dicts.
+    Each dict has: title, angle_hint, views_7d, engagement_score, channel_count, rpm_estimate.
     """
-    client = NexLevClient()
-    niche = config.NEXLEV_NICHE
+    service = _get_service()
 
-    # Broad trending search
-    try:
-        trending = client.get_trending_topics(niche, limit=15)
-    except Exception:
-        logger.warning("NexLev trending endpoint failed, falling back to video search")
-        trending = []
+    # Look back 30 days for recent performers
+    published_after = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
-    # Keyword search for recent high-performing videos
-    try:
-        search_results = client.search_videos(niche, limit=20)
-    except Exception as exc:
-        logger.error("NexLev video search failed: %s", exc)
-        search_results = []
+    seen_ids: set[str] = set()
+    all_items: list[dict] = []
 
-    # Niche overview for context (RPM, sub-niche data)
-    try:
-        overview = client.get_niche_overview(niche)
-    except Exception as exc:
-        logger.warning("NexLev niche overview failed: %s", exc)
-        overview = {}
+    for query in SEARCH_QUERIES:
+        try:
+            items = _search_videos(service, query, published_after)
+            for item in items:
+                vid_id = item["id"].get("videoId")
+                if vid_id and vid_id not in seen_ids:
+                    seen_ids.add(vid_id)
+                    all_items.append(item)
+        except Exception as exc:
+            logger.warning("YouTube search failed for query %r: %s", query, exc)
 
-    candidates = _normalise_results(trending, search_results, overview)
+    if not all_items:
+        raise RuntimeError("YouTube Data API returned no results — check API quota and credentials")
+
+    # Fetch statistics in one batch call
+    video_ids = [item["id"]["videoId"] for item in all_items if item["id"].get("videoId")]
+    stats = _get_video_stats(service, video_ids)
+
+    # Normalise into candidate dicts
+    candidates = _normalise(stats)
     candidates = _deduplicate(candidates, recent_topics)
-    logger.info("Got %d candidate topics after deduplication", len(candidates))
+    candidates.sort(key=lambda c: c["engagement_score"], reverse=True)
+
+    logger.info("Got %d candidate topics from YouTube Data API", len(candidates))
     return candidates[:12]
 
 
-def _normalise_results(
-    trending: list[dict],
-    search_results: list[dict],
-    overview: dict,
-) -> list[dict[str, Any]]:
-    """Normalise mixed NexLev response shapes into a consistent list."""
-    seen: set[str] = set()
+def _normalise(stats: dict[str, dict]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-
-    def add(item: dict) -> None:
-        title = (
-            item.get("title")
-            or item.get("video_title")
-            or item.get("name")
-            or item.get("topic")
-            or ""
-        ).strip()
-        if not title or title.lower() in seen:
-            return
-        seen.add(title.lower())
+    for vid_id, data in stats.items():
+        views = data["views"]
+        likes = data["likes"]
+        # Simple engagement score: likes as % of views, weighted by view count
+        engagement = (likes / max(views, 1)) * min(views / 1000, 10)
         out.append({
-            "title": title,
-            "angle_hint": item.get("angle") or item.get("description") or "",
-            "views_7d": item.get("views_7d") or item.get("views") or 0,
-            "engagement_score": item.get("engagement_score") or item.get("outlier_score") or 0,
-            "channel_count": item.get("channel_count") or 0,
-            "rpm_estimate": item.get("rpm") or overview.get("avg_rpm") or 0,
+            "title": data["title"],
+            "angle_hint": data["description"],
+            "views_7d": views,
+            "engagement_score": round(engagement, 3),
+            "channel_count": 1,
+            "rpm_estimate": 0,
+            "source_channel": data["channel"],
         })
-
-    for item in trending:
-        add(item)
-    for item in search_results:
-        add(item)
-
     return out
 
 
 def _deduplicate(candidates: list[dict], recent_topics: list[str]) -> list[dict]:
-    """Remove topics too similar to recently published ones."""
     recent_lower = {t.lower() for t in recent_topics}
     return [
         c for c in candidates
-        if not any(
-            _topic_overlap(c["title"].lower(), r) for r in recent_lower
-        )
+        if not any(_overlap(c["title"].lower(), r) for r in recent_lower)
     ]
 
 
-def _topic_overlap(a: str, b: str) -> bool:
-    words_a = set(a.split())
-    words_b = set(b.split())
-    if not words_a or not words_b:
+def _overlap(a: str, b: str) -> bool:
+    wa, wb = set(a.split()), set(b.split())
+    if not wa or not wb:
         return False
-    overlap = len(words_a & words_b) / min(len(words_a), len(words_b))
-    return overlap > 0.6
+    return len(wa & wb) / min(len(wa), len(wb)) > 0.6

@@ -15,8 +15,8 @@ def _require(key: str) -> str:
 OPENROUTER_API_KEY: str = _require("OPENROUTER_API_KEY")
 OPENAI_API_KEY: str = _require("OPENAI_API_KEY")   # DALL-E 3 only
 GROQ_API_KEY: str = _require("GROQ_API_KEY")        # Whisper transcription
-NEXLEV_API_KEY: str = _require("NEXLEV_API_KEY")
-TUBEBUDDY_API_KEY: str = _require("TUBEBUDDY_API_KEY")
+NEXLEV_API_KEY: str = os.getenv("NEXLEV_API_KEY", "")   # optional
+TUBEBUDDY_API_KEY: str = os.getenv("TUBEBUDDY_API_KEY", "")  # optional — A/B tests skipped if blank
 TWILIO_ACCOUNT_SID: str = _require("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN: str = _require("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM: str = _require("TWILIO_WHATSAPP_FROM")
