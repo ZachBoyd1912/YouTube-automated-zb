@@ -1,0 +1,56 @@
+{
+  "name": "05_weekly_analytics",
+  "flow": [
+    {
+      "id": 1,
+      "module": "gateway:CustomWebHook",
+      "version": 1,
+      "parameters": { "hook": 1, "maxResults": 1 },
+      "mapper": {},
+      "metadata": {
+        "designer": { "x": 0, "y": 0 },
+        "restore": {
+          "parameters": {
+            "hook": { "label": "Weekly Analytics Trigger (replace with Schedule trigger)" }
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "module": "http:ActionSendData",
+      "version": 3,
+      "parameters": { "handleErrors": true },
+      "mapper": {
+        "url": "http://YOUR_VPS_IP:8000/stage7",
+        "method": "POST",
+        "headers": [
+          { "name": "Authorization", "value": "Bearer YOUR_API_SECRET_KEY" },
+          { "name": "Content-Type", "value": "application/json" }
+        ],
+        "queryString": [],
+        "body": "{}",
+        "bodyType": "raw",
+        "contentType": "application/json",
+        "timeout": 300,
+        "parseResponse": true
+      },
+      "metadata": { "designer": { "x": 300, "y": 0 } }
+    }
+  ],
+  "metadata": {
+    "instant": false,
+    "version": 1,
+    "scenario": {
+      "roundtrips": 1,
+      "maxErrors": 3,
+      "autoCommit": true,
+      "sequential": false
+    },
+    "zone": "eu2.make.com"
+  },
+  "_setup_notes": {
+    "step1": "Replace the CustomWebHook trigger with a 'Schedule' trigger: Sunday at 09:00 Europe/Dublin",
+    "step2": "Replace YOUR_VPS_IP and YOUR_API_SECRET_KEY"
+  }
+}
